@@ -4,7 +4,35 @@ All notable changes to claude-squad will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased] - Per-Repository Isolation
+## [Unreleased] - Local Worktrees
+
+### ⚠️ BREAKING CHANGES
+
+This release moves worktrees from the global home directory to local repository storage.
+
+**What Changed:**
+- Worktrees moved from `~/.claude-squad/worktrees/<repo-hash>/` to `<repo>/.claude-squad/worktrees/`
+- Worktrees now stored within the repository (gitignored)
+- Better for containerized workflows and backup/sync scenarios
+
+**Migration Required:**
+Before upgrading, run `cs reset` in each repository with active instances.
+
+### Changed
+
+- **Worktree location**: `~/.claude-squad/worktrees/<repo-hash>/` → `<repo>/.claude-squad/worktrees/`
+- **Cleanup command**: Now detects orphaned sessions using tmux environment variables
+- **Cleanup flags**: Added `--kill-all` flag to kill all sessions without prompting
+- **Tmux sessions**: Now store repo path in `CLAUDE_SQUAD_REPO` environment variable
+
+### Added
+
+- Tmux environment variable tracking for reliable orphan detection
+- `.claude-squad/` automatically added to project `.gitignore`
+- Improved cleanup command shows active vs orphaned sessions
+- Better support for Docker/container workflows (self-contained repositories)
+
+## [1.0.13] - Per-Repository Isolation
 
 ### ⚠️ BREAKING CHANGES
 

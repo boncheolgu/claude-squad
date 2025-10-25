@@ -1,5 +1,6 @@
 .idea
 .aider*
+.claude-squad/
 claude-squad
 **.DS_Store
 cs

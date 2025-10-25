@@ -1,6 +1,47 @@
-# Migration Guide: Per-Repository Isolation
+# Migration Guides
 
-This guide helps you migrate from the old global state model to the new per-repository isolation model.
+This document contains migration guides for major claude-squad changes.
+
+## Migration: Local Worktrees (Latest)
+
+### What's Changing?
+
+**Before:**
+- Worktrees stored globally: `~/.claude-squad/worktrees/<repo-hash>/`
+- Worktrees organized by repo hash in home directory
+
+**After:**
+- Worktrees stored locally: `<repo>/.claude-squad/worktrees/`
+- Worktrees within repository (gitignored)
+- Better for containers and backups
+
+### Migration Steps
+
+**Required:** Run `cs reset` in each repository before upgrading
+
+```bash
+# In each repository where you have active instances
+cd /path/to/your/repo
+cs reset  # Cleans up old worktrees and state
+
+# Upgrade claude-squad
+# (however you installed it)
+
+# Start fresh with local worktrees
+cs
+```
+
+### After Migration
+
+Worktrees will now be created in `<repo>/.claude-squad/worktrees/` instead of `~/.claude-squad/worktrees/`.
+
+Old worktrees in `~/.claude-squad/worktrees/` can be safely deleted after migration.
+
+---
+
+## Migration: Per-Repository Isolation (v1.0.13)
+
+This guide helps you migrate from the old global state model to the per-repository isolation model.
 
 ## What's Changing?
 

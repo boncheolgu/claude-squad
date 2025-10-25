@@ -23,11 +23,12 @@ import (
 )
 
 var (
-	version      = "1.0.13"
-	programFlag  string
-	autoYesFlag  bool
-	daemonFlag   bool
-	repoPathFlag string
+	version         = "1.0.13"
+	programFlag     string
+	autoYesFlag     bool
+	daemonFlag      bool
+	repoPathFlag    string
+	cleanupKillAll  bool
 	rootCmd      = &cobra.Command{
 		Use:   "claude-squad",
 		Short: "Claude Squad - Manage multiple AI agents like Claude Code, Aider, Codex, and Amp.",
@@ -195,10 +196,14 @@ var (
 
 	cleanupCmd = &cobra.Command{
 		Use:   "cleanup",
-		Short: "Clean up orphaned tmux sessions",
-		Long: `Clean up tmux sessions that no longer have an associated repository.
+		Short: "List or clean up claude-squad tmux sessions",
+		Long: `List all claude-squad tmux sessions, or clean up orphaned sessions.
 
-This happens when:
+Usage:
+  cs cleanup              List all sessions (default)
+  cs cleanup --kill-all   Kill all claude-squad sessions without prompting
+
+Orphaned sessions occur when:
 - A repository is deleted but tmux sessions remain
 - .claude-squad/ directory is removed manually
 - Sessions are left after repository moves`,
@@ -206,6 +211,11 @@ This happens when:
 			log.Initialize(false)
 			defer log.Close()
 
+			if cleanupKillAll {
+				return killAllClaudeSquadSessions()
+			}
+
+			// Default: list sessions and check for orphans
 			return cleanupOrphanedSessions()
 		},
 	}
@@ -230,81 +240,189 @@ func init() {
 		panic(err)
 	}
 
+	// Cleanup command flags
+	cleanupCmd.Flags().BoolVar(&cleanupKillAll, "kill-all", false, "Kill all claude-squad sessions without prompting")
+
 	rootCmd.AddCommand(debugCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(resetCmd)
 	rootCmd.AddCommand(cleanupCmd)
 }
 
-// cleanupOrphanedSessions finds and removes tmux sessions that no longer have an associated repository
-func cleanupOrphanedSessions() error {
-	// List all tmux sessions
+// findClaudeSquadSessions returns a list of all claude-squad tmux sessions
+func findClaudeSquadSessions() ([]string, error) {
 	cmd := exec.Command("tmux", "ls")
 	output, err := cmd2.MakeExecutor().Output(cmd)
 	if err != nil {
-		// Exit code 1 means no sessions exist
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			fmt.Println("No tmux sessions found")
-			return nil
+			return []string{}, nil
 		}
-		return fmt.Errorf("failed to list tmux sessions: %w", err)
+		return nil, fmt.Errorf("failed to list tmux sessions: %w", err)
 	}
 
-	// Parse session names matching claudesquad_<hash>_*
-	// Format: claudesquad_fe08346a_mytask: ...
-	re := regexp.MustCompile(`claudesquad_([a-f0-9]{8})_[^:]+:`)
-	matches := re.FindAllStringSubmatch(string(output), -1)
+	re := regexp.MustCompile(`claudesquad_[a-f0-9]{8}_[^:]+`)
+	matches := re.FindAllString(string(output), -1)
+	return matches, nil
+}
 
-	if len(matches) == 0 {
+// groupSessionsByHash groups session names by their repo hash
+func groupSessionsByHash(sessions []string) map[string][]string {
+	grouped := make(map[string][]string)
+	re := regexp.MustCompile(`claudesquad_([a-f0-9]{8})_`)
+
+	for _, sess := range sessions {
+		if match := re.FindStringSubmatch(sess); len(match) >= 2 {
+			hash := match[1]
+			grouped[hash] = append(grouped[hash], sess)
+		}
+	}
+
+	return grouped
+}
+
+// getSessionRepoPath queries tmux for the repo path stored in the session environment
+func getSessionRepoPath(sessionName string) (string, error) {
+	cmd := exec.Command("tmux", "show-environment", "-t", sessionName, "CLAUDE_SQUAD_REPO")
+	output, err := cmd2.MakeExecutor().Output(cmd)
+	if err != nil {
+		return "", err
+	}
+
+	// Parse "CLAUDE_SQUAD_REPO=<path>" format
+	parts := strings.SplitN(string(output), "=", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("unexpected environment variable format")
+	}
+
+	return strings.TrimSpace(parts[1]), nil
+}
+
+// cleanupOrphanedSessions lists sessions and identifies orphaned ones using tmux env vars
+func cleanupOrphanedSessions() error {
+	sessions, err := findClaudeSquadSessions()
+	if err != nil {
+		return err
+	}
+
+	if len(sessions) == 0 {
 		fmt.Println("No claude-squad tmux sessions found")
 		return nil
 	}
 
-	// Collect unique repo hashes
-	repoHashes := make(map[string][]string) // hash -> list of session names
-	for _, match := range matches {
-		if len(match) >= 2 {
-			hash := match[1]
-			sessionName := strings.TrimSuffix(match[0], ":")
-			repoHashes[hash] = append(repoHashes[hash], sessionName)
-		}
+	// Categorize sessions
+	type SessionInfo struct {
+		name     string
+		repoPath string
+		status   string // "active", "orphaned", or "unknown"
 	}
 
-	fmt.Printf("Found %d unique repository hashes in tmux sessions\n", len(repoHashes))
-
-	// For each hash, check if .claude-squad directory exists
-	orphanedSessions := []string{}
-	for hash, sessions := range repoHashes {
-		// Check if worktree directory exists for this hash
-		configDir, err := config.GetConfigDir()
+	var infos []SessionInfo
+	for _, sess := range sessions {
+		repoPath, err := getSessionRepoPath(sess)
 		if err != nil {
-			return fmt.Errorf("failed to get config directory: %w", err)
+			// Can't get repo path - old session or error
+			infos = append(infos, SessionInfo{name: sess, repoPath: "(unknown)", status: "unknown"})
+			continue
 		}
 
-		worktreeDir := filepath.Join(configDir, "worktrees", hash)
-
-		// If worktree directory doesn't exist, these sessions are orphaned
-		if _, err := os.Stat(worktreeDir); os.IsNotExist(err) {
-			fmt.Printf("Repo hash %s: No worktree directory found (orphaned)\n", hash)
-			orphanedSessions = append(orphanedSessions, sessions...)
+		// Check if repo path still exists
+		if _, err := os.Stat(repoPath); os.IsNotExist(err) {
+			infos = append(infos, SessionInfo{name: sess, repoPath: repoPath, status: "orphaned"})
 		} else {
-			fmt.Printf("Repo hash %s: Active (%d sessions)\n", hash, len(sessions))
+			infos = append(infos, SessionInfo{name: sess, repoPath: repoPath, status: "active"})
 		}
 	}
 
-	if len(orphanedSessions) == 0 {
-		fmt.Println("\nNo orphaned sessions found - all clean!")
+	// Group by status
+	var active, orphaned, unknown []SessionInfo
+	for _, info := range infos {
+		switch info.status {
+		case "active":
+			active = append(active, info)
+		case "orphaned":
+			orphaned = append(orphaned, info)
+		case "unknown":
+			unknown = append(unknown, info)
+		}
+	}
+
+	// Display results
+	fmt.Printf("Found %d claude-squad session(s):\n\n", len(sessions))
+
+	if len(active) > 0 {
+		fmt.Printf("Active sessions (%d):\n", len(active))
+		for _, info := range active {
+			fmt.Printf("  - %s\n    repo: %s\n", info.name, info.repoPath)
+		}
+		fmt.Println()
+	}
+
+	if len(unknown) > 0 {
+		fmt.Printf("Unknown sessions (%d) - created before repo tracking:\n", len(unknown))
+		for _, info := range unknown {
+			fmt.Printf("  - %s\n", info.name)
+		}
+		fmt.Println()
+	}
+
+	if len(orphaned) == 0 {
+		fmt.Println("No orphaned sessions found - all clean!")
+		fmt.Println("\nCommands:")
+		fmt.Println("  cs cleanup --kill-all       Kill all sessions")
+		fmt.Println("  tmux kill-session -t <name>   Kill specific session")
+		return nil
+	}
+
+	// Found orphaned sessions - ask user
+	fmt.Printf("Orphaned sessions (%d) - repository no longer exists:\n", len(orphaned))
+	for _, info := range orphaned {
+		fmt.Printf("  - %s\n    repo: %s (not found)\n", info.name, info.repoPath)
+	}
+	fmt.Println()
+
+	fmt.Print("Kill orphaned sessions? [y/N]: ")
+	var response string
+	fmt.Scanln(&response)
+
+	if response != "y" && response != "Y" {
+		fmt.Println("Cleanup cancelled")
 		return nil
 	}
 
 	// Kill orphaned sessions
-	fmt.Printf("\nCleaning up %d orphaned session(s)...\n", len(orphanedSessions))
-	for _, sessionName := range orphanedSessions {
-		fmt.Printf("  Killing: %s\n", sessionName)
-		killCmd := exec.Command("tmux", "kill-session", "-t", sessionName)
+	fmt.Println("\nKilling orphaned sessions...")
+	for _, info := range orphaned {
+		fmt.Printf("  Killing: %s\n", info.name)
+		killCmd := exec.Command("tmux", "kill-session", "-t", info.name)
 		if err := cmd2.MakeExecutor().Run(killCmd); err != nil {
-			log.WarningLog.Printf("failed to kill session %s: %v", sessionName, err)
-			fmt.Printf("  Warning: Failed to kill %s\n", sessionName)
+			log.WarningLog.Printf("failed to kill session %s: %v", info.name, err)
+			fmt.Printf("  Warning: Failed to kill %s\n", info.name)
+		}
+	}
+
+	fmt.Println("\nCleanup complete!")
+	return nil
+}
+
+// killAllClaudeSquadSessions kills all claude-squad sessions without prompting
+func killAllClaudeSquadSessions() error {
+	sessions, err := findClaudeSquadSessions()
+	if err != nil {
+		return err
+	}
+
+	if len(sessions) == 0 {
+		fmt.Println("No sessions to clean up")
+		return nil
+	}
+
+	fmt.Printf("Killing %d session(s)...\n", len(sessions))
+	for _, sess := range sessions {
+		fmt.Printf("  Killing: %s\n", sess)
+		killCmd := exec.Command("tmux", "kill-session", "-t", sess)
+		if err := cmd2.MakeExecutor().Run(killCmd); err != nil {
+			log.WarningLog.Printf("failed to kill session %s: %v", sess, err)
+			fmt.Printf("  Warning: Failed to kill %s\n", sess)
 		}
 	}
 

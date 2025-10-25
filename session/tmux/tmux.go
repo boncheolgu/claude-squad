@@ -32,6 +32,9 @@ type TmuxSession struct {
 	// The name of the tmux session and the sanitized name used for tmux commands.
 	sanitizedName string
 	program       string
+	// repoPath is the canonical path to the repository this session belongs to.
+	// Used for storing in tmux environment for orphan detection.
+	repoPath string
 	// ptyFactory is used to create a PTY for the tmux session.
 	ptyFactory PtyFactory
 	// cmdExec is used to execute commands in the tmux session.
@@ -88,9 +91,18 @@ func NewTmuxSessionWithDeps(name string, program string, repoPath string, ptyFac
 }
 
 func newTmuxSession(name string, program string, repoPath string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+	// Get canonical repo path to handle symlinks
+	canonicalPath, err := config.GetCanonicalRepoPath(repoPath)
+	if err != nil {
+		// Fallback to original path if canonicalization fails
+		log.WarningLog.Printf("failed to get canonical repo path, using original: %v", err)
+		canonicalPath = repoPath
+	}
+
 	return &TmuxSession{
 		sanitizedName: toClaudeSquadTmuxName(name, repoPath),
 		program:       program,
+		repoPath:      canonicalPath,
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
 	}
@@ -149,6 +161,12 @@ func (t *TmuxSession) Start(workDir string) error {
 	mouseCmd := exec.Command("tmux", "set-option", "-t", t.sanitizedName, "mouse", "on")
 	if err := t.cmdExec.Run(mouseCmd); err != nil {
 		log.InfoLog.Printf("Warning: failed to enable mouse scrolling for session %s: %v", t.sanitizedName, err)
+	}
+
+	// Store repo path in tmux environment for orphan detection
+	setenvCmd := exec.Command("tmux", "setenv", "-t", t.sanitizedName, "CLAUDE_SQUAD_REPO", t.repoPath)
+	if err := t.cmdExec.Run(setenvCmd); err != nil {
+		log.WarningLog.Printf("failed to set repo path env var for session %s: %v", t.sanitizedName, err)
 	}
 
 	err = t.Restore()

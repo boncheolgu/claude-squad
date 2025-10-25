@@ -10,19 +10,14 @@ import (
 )
 
 func getWorktreeDirectory(repoPath string) (string, error) {
-	configDir, err := config.GetConfigDir()
+	// Get canonical repo path to handle symlinks
+	canonical, err := config.GetCanonicalRepoPath(repoPath)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get canonical repo path: %w", err)
 	}
 
-	// Get repo hash to organize worktrees by repository
-	repoHash, err := config.GetRepoHash(repoPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to get repo hash: %w", err)
-	}
-
-	// Organize worktrees: ~/.claude-squad/worktrees/<repo-hash>/
-	worktreeBaseDir := filepath.Join(configDir, "worktrees", repoHash)
+	// Worktrees are now stored locally: <repo>/.claude-squad/worktrees/
+	worktreeBaseDir := filepath.Join(canonical, config.StateDirName, "worktrees")
 
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll(worktreeBaseDir, 0755); err != nil {

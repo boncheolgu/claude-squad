@@ -66,7 +66,7 @@ Claude Squad uses a **per-repository isolation model**:
 **Repository Identification** (`config/repo.go`):
 - `GetCanonicalRepoPath()`: Resolves symlinks to ensure same repo always gets same hash
 - `GetRepoHash()`: SHA256 hash (8 hex chars) uniquely identifies each repository
-- Used for: organizing worktrees, namespacing tmux sessions, isolating state
+- Used for: namespacing tmux sessions, isolating per-repo state
 
 **Process Locking** (`lock/lockfile.go`, `lock/lockfile_*.go`):
 - Atomic file locking using `flock()` (Unix) or `LockFileEx` (Windows)
@@ -75,8 +75,8 @@ Claude Squad uses a **per-repository isolation model**:
 - Auto-released when process exits (kernel-enforced)
 
 **Git Worktree Integration** (`session/git/`):
-- Each instance gets an isolated git worktree in `~/.claude-squad/worktrees/<repo-hash>/`
-- Worktrees organized by repository to prevent collisions
+- Each instance gets an isolated git worktree in `<repo>/.claude-squad/worktrees/`
+- Worktrees are stored locally within the repository (gitignored)
 - Worktrees are created from the current repo with unique branches (prefix + sanitized session name)
 - Operations: Setup, Cleanup, Remove, Prune, IsDirty, CommitChanges, PushChanges
 - Diff tracking compares current state against base commit SHA
@@ -84,6 +84,7 @@ Claude Squad uses a **per-repository isolation model**:
 **Tmux Session Management** (`session/tmux/tmux.go`):
 - Each instance runs in a dedicated tmux session: `claudesquad_<repo-hash>_<title>`
 - Repo hash prevents session name collisions across different repositories
+- Repo path stored in tmux environment variable (`CLAUDE_SQUAD_REPO`) for orphan detection
 - PTY-based attachment enables resizing and input/output streaming
 - StatusMonitor tracks content changes using SHA256 hashing to detect when AI is working vs. waiting
 - Supports Claude, Aider, and Gemini with auto-detection of trust prompts
@@ -147,11 +148,11 @@ Claude Squad uses a **per-repository isolation model**:
 - DetachSafely vs. Detach: Safely version doesn't panic, used in Pause operation
 
 ### Git Worktree Naming and Organization
-- Worktrees stored in global config dir, organized by repo hash
-- Path: `~/.claude-squad/worktrees/<repo-hash>/<sanitized_title>_<hex_timestamp>`
+- Worktrees stored locally in repository: `<repo>/.claude-squad/worktrees/`
+- Path: `<repo>/.claude-squad/worktrees/<sanitized_title>_<hex_timestamp>`
 - Branch names: `<configurable_prefix><sanitized_title>`
 - Always use absolute paths for reliability
-- Repo hash prevents collisions when multiple repos have instances with same title
+- Worktrees are gitignored (`.claude-squad/` directory)
 
 ### Canonical Path Resolution
 - All repo paths resolved via `filepath.EvalSymlinks()` before hashing
