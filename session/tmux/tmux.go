@@ -3,6 +3,7 @@ package tmux
 import (
 	"bytes"
 	"claude-squad/cmd"
+	"claude-squad/config"
 	"claude-squad/log"
 	"context"
 	"crypto/sha256"
@@ -61,25 +62,34 @@ const TmuxPrefix = "claudesquad_"
 
 var whiteSpaceRegex = regexp.MustCompile(`\s+`)
 
-func toClaudeSquadTmuxName(str string) string {
-	str = whiteSpaceRegex.ReplaceAllString(str, "")
-	str = strings.ReplaceAll(str, ".", "_") // tmux replaces all . with _
-	return fmt.Sprintf("%s%s", TmuxPrefix, str)
+func toClaudeSquadTmuxName(title string, repoPath string) string {
+	title = whiteSpaceRegex.ReplaceAllString(title, "")
+	title = strings.ReplaceAll(title, ".", "_") // tmux replaces all . with _
+
+	// Get repo hash to namespace tmux sessions
+	repoHash, err := config.GetRepoHash(repoPath)
+	if err != nil {
+		// Fallback to unhashed name if we can't get hash (shouldn't happen)
+		log.ErrorLog.Printf("failed to get repo hash for tmux name: %v", err)
+		return fmt.Sprintf("%s%s", TmuxPrefix, title)
+	}
+
+	return fmt.Sprintf("%s%s_%s", TmuxPrefix, repoHash, title)
 }
 
-// NewTmuxSession creates a new TmuxSession with the given name and program.
-func NewTmuxSession(name string, program string) *TmuxSession {
-	return newTmuxSession(name, program, MakePtyFactory(), cmd.MakeExecutor())
+// NewTmuxSession creates a new TmuxSession with the given name, program, and repo path.
+func NewTmuxSession(name string, program string, repoPath string) *TmuxSession {
+	return newTmuxSession(name, program, repoPath, MakePtyFactory(), cmd.MakeExecutor())
 }
 
 // NewTmuxSessionWithDeps creates a new TmuxSession with provided dependencies for testing.
-func NewTmuxSessionWithDeps(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
-	return newTmuxSession(name, program, ptyFactory, cmdExec)
+func NewTmuxSessionWithDeps(name string, program string, repoPath string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+	return newTmuxSession(name, program, repoPath, ptyFactory, cmdExec)
 }
 
-func newTmuxSession(name string, program string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
+func newTmuxSession(name string, program string, repoPath string, ptyFactory PtyFactory, cmdExec cmd.Executor) *TmuxSession {
 	return &TmuxSession{
-		sanitizedName: toClaudeSquadTmuxName(name),
+		sanitizedName: toClaudeSquadTmuxName(name, repoPath),
 		program:       program,
 		ptyFactory:    ptyFactory,
 		cmdExec:       cmdExec,
@@ -497,6 +507,11 @@ func (t *TmuxSession) CapturePaneContentWithOptions(start, end string) (string, 
 
 // CleanupSessions kills all tmux sessions that start with "session-"
 func CleanupSessions(cmdExec cmd.Executor) error {
+	return CleanupSessionsByPrefix(cmdExec, TmuxPrefix)
+}
+
+// CleanupSessionsByPrefix removes all tmux sessions matching a specific prefix
+func CleanupSessionsByPrefix(cmdExec cmd.Executor, prefix string) error {
 	// First try to list sessions
 	cmd := exec.Command("tmux", "ls")
 	output, err := cmdExec.Output(cmd)
@@ -510,7 +525,7 @@ func CleanupSessions(cmdExec cmd.Executor) error {
 		return fmt.Errorf("failed to list tmux sessions: %v", err)
 	}
 
-	re := regexp.MustCompile(fmt.Sprintf(`%s.*:`, TmuxPrefix))
+	re := regexp.MustCompile(fmt.Sprintf(`%s.*:`, regexp.QuoteMeta(prefix)))
 	matches := re.FindAllString(string(output), -1)
 	for i, match := range matches {
 		matches[i] = match[:strings.Index(match, ":")]

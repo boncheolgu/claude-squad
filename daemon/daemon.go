@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// RunDaemon runs the daemon process which iterates over all sessions and runs AutoYes mode on them.
+// RunDaemon runs the daemon process which iterates over all sessions in a repository and runs AutoYes mode on them.
 // It's expected that the main process kills the daemon when the main process starts.
-func RunDaemon(cfg *config.Config) error {
-	log.InfoLog.Printf("starting daemon")
-	state := config.LoadState()
+func RunDaemon(cfg *config.Config, repoPath string) error {
+	log.InfoLog.Printf("starting daemon for repo: %s", repoPath)
+	state := config.LoadState(repoPath)
 	storage, err := session.NewStorage(state)
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage: %w", err)
@@ -87,15 +87,16 @@ func RunDaemon(cfg *config.Config) error {
 	return nil
 }
 
-// LaunchDaemon launches the daemon process.
-func LaunchDaemon() error {
+// LaunchDaemon launches the daemon process for a specific repository.
+func LaunchDaemon(repoPath string) error {
 	// Find the claude squad binary.
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	cmd := exec.Command(execPath, "--daemon")
+	// Pass repo path to daemon so it knows which repo to monitor
+	cmd := exec.Command(execPath, "--daemon", "--repo-path", repoPath)
 
 	// Detach the process from the parent
 	cmd.Stdin = nil
@@ -109,15 +110,15 @@ func LaunchDaemon() error {
 		return fmt.Errorf("failed to start child process: %w", err)
 	}
 
-	log.InfoLog.Printf("started daemon child process with PID: %d", cmd.Process.Pid)
+	log.InfoLog.Printf("started daemon child process with PID: %d for repo %s", cmd.Process.Pid, repoPath)
 
-	// Save PID to a file for later management
-	pidDir, err := config.GetConfigDir()
+	// Save PID to per-repo state directory
+	stateDir, err := config.GetStateDir(repoPath)
 	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
+		return fmt.Errorf("failed to get state directory: %w", err)
 	}
 
-	pidFile := filepath.Join(pidDir, "daemon.pid")
+	pidFile := filepath.Join(stateDir, "daemon.pid")
 	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644); err != nil {
 		return fmt.Errorf("failed to write PID file: %w", err)
 	}
@@ -126,15 +127,15 @@ func LaunchDaemon() error {
 	return nil
 }
 
-// StopDaemon attempts to stop a running daemon process if it exists. Returns no error if the daemon is not found
-// (assumes the daemon does not exist).
-func StopDaemon() error {
-	pidDir, err := config.GetConfigDir()
+// StopDaemon attempts to stop a running daemon process for a specific repository.
+// Returns no error if the daemon is not found (assumes the daemon does not exist).
+func StopDaemon(repoPath string) error {
+	stateDir, err := config.GetStateDir(repoPath)
 	if err != nil {
-		return fmt.Errorf("failed to get config directory: %w", err)
+		return fmt.Errorf("failed to get state directory: %w", err)
 	}
 
-	pidFile := filepath.Join(pidDir, "daemon.pid")
+	pidFile := filepath.Join(stateDir, "daemon.pid")
 	data, err := os.ReadFile(pidFile)
 	if err != nil {
 		if os.IsNotExist(err) {

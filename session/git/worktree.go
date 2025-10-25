@@ -4,17 +4,32 @@ import (
 	"claude-squad/config"
 	"claude-squad/log"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 )
 
-func getWorktreeDirectory() (string, error) {
+func getWorktreeDirectory(repoPath string) (string, error) {
 	configDir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
 	}
 
-	return filepath.Join(configDir, "worktrees"), nil
+	// Get repo hash to organize worktrees by repository
+	repoHash, err := config.GetRepoHash(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to get repo hash: %w", err)
+	}
+
+	// Organize worktrees: ~/.claude-squad/worktrees/<repo-hash>/
+	worktreeBaseDir := filepath.Join(configDir, "worktrees", repoHash)
+
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(worktreeBaseDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create worktree directory: %w", err)
+	}
+
+	return worktreeBaseDir, nil
 }
 
 // GitWorktree manages git worktree operations for a session
@@ -60,7 +75,7 @@ func NewGitWorktree(repoPath string, sessionName string) (tree *GitWorktree, bra
 		return nil, "", err
 	}
 
-	worktreeDir, err := getWorktreeDirectory()
+	worktreeDir, err := getWorktreeDirectory(repoPath)
 	if err != nil {
 		return nil, "", err
 	}

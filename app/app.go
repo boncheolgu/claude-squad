@@ -20,9 +20,9 @@ import (
 const GlobalInstanceLimit = 10
 
 // Run is the main entrypoint into the application.
-func Run(ctx context.Context, program string, autoYes bool) error {
+func Run(ctx context.Context, program string, autoYes bool, repoPath string) error {
 	p := tea.NewProgram(
-		newHome(ctx, program, autoYes),
+		newHome(ctx, program, autoYes, repoPath),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(), // Mouse scroll
 	)
@@ -97,12 +97,12 @@ type home struct {
 	confirmationOverlay *overlay.ConfirmationOverlay
 }
 
-func newHome(ctx context.Context, program string, autoYes bool) *home {
+func newHome(ctx context.Context, program string, autoYes bool, repoPath string) *home {
 	// Load application config
 	appConfig := config.LoadConfig()
 
-	// Load application state
-	appState := config.LoadState()
+	// Load application state for this repository
+	appState := config.LoadState(repoPath)
 
 	// Initialize storage
 	storage, err := session.NewStorage(appState)

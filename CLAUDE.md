@@ -48,6 +48,13 @@ go run main.go reset
 
 ## Architecture
 
+### Per-Repository Isolation Model
+
+Claude Squad uses a **per-repository isolation model**:
+- Each repository gets its own isolated state, instances, and worktrees
+- Multiple repositories can run `cs` simultaneously without conflicts
+- Only one `cs` instance per repository (enforced by file locking)
+
 ### Core Components
 
 **Instance Management** (`session/instance.go`, `session/storage.go`):
@@ -56,14 +63,27 @@ go run main.go reset
 - Instances can be paused (commits changes, removes worktree, keeps branch) and resumed
 - Storage handles serialization/deserialization of instances between runs
 
+**Repository Identification** (`config/repo.go`):
+- `GetCanonicalRepoPath()`: Resolves symlinks to ensure same repo always gets same hash
+- `GetRepoHash()`: SHA256 hash (8 hex chars) uniquely identifies each repository
+- Used for: organizing worktrees, namespacing tmux sessions, isolating state
+
+**Process Locking** (`lock/lockfile.go`, `lock/lockfile_*.go`):
+- Atomic file locking using `flock()` (Unix) or `LockFileEx` (Windows)
+- Lock file: `<repo>/.claude-squad/cs.lock`
+- Prevents multiple `cs` instances in same repository
+- Auto-released when process exits (kernel-enforced)
+
 **Git Worktree Integration** (`session/git/`):
-- Each instance gets an isolated git worktree in `~/.config/claude-squad/worktrees/`
+- Each instance gets an isolated git worktree in `~/.claude-squad/worktrees/<repo-hash>/`
+- Worktrees organized by repository to prevent collisions
 - Worktrees are created from the current repo with unique branches (prefix + sanitized session name)
 - Operations: Setup, Cleanup, Remove, Prune, IsDirty, CommitChanges, PushChanges
 - Diff tracking compares current state against base commit SHA
 
 **Tmux Session Management** (`session/tmux/tmux.go`):
-- Each instance runs in a dedicated tmux session prefixed with `claudesquad_`
+- Each instance runs in a dedicated tmux session: `claudesquad_<repo-hash>_<title>`
+- Repo hash prevents session name collisions across different repositories
 - PTY-based attachment enables resizing and input/output streaming
 - StatusMonitor tracks content changes using SHA256 hashing to detect when AI is working vs. waiting
 - Supports Claude, Aider, and Gemini with auto-detection of trust prompts
@@ -76,10 +96,18 @@ go run main.go reset
 - Key components: List, Menu, TabbedWindow (Preview + Diff), ErrBox, Overlays
 - Preview pane shows live tmux output; Diff pane shows git changes
 
-**Configuration** (`config/`):
-- Config stored in `~/.config/claude-squad/config.json`
-- State (instances) stored in `~/.config/claude-squad/state.json`
-- Configurable: DefaultProgram, BranchPrefix, AutoYes
+**State Storage** (`config/state.go`):
+- **Per-repo state**: `<repo>/.claude-squad/state.json` (gitignored)
+- **Global config**: `~/.claude-squad/config.json` (DefaultProgram, BranchPrefix, AutoYes)
+- Proactive backups: `state.json.bak` created before each write
+- Corruption recovery: Automatically restores from backup if state file corrupted
+- Each repository's instances are isolated and independent
+
+**Daemon Management** (`daemon/daemon.go`):
+- Per-repository daemons for AutoYes mode
+- Each repo gets its own daemon process: `<repo>/.claude-squad/daemon.pid`
+- Daemon only monitors instances in its specific repository
+- Multiple repos = multiple independent daemons
 
 ### Key Workflows
 
@@ -118,31 +146,46 @@ go run main.go reset
 - On Detach: must close PTY, restore new one, cancel goroutines, wait for cleanup
 - DetachSafely vs. Detach: Safely version doesn't panic, used in Pause operation
 
-### Git Worktree Naming
-- Worktrees stored in config dir, not in repo, to avoid cluttering user's workspace
-- Names: `<sanitized_title>_<hex_timestamp>` for uniqueness
+### Git Worktree Naming and Organization
+- Worktrees stored in global config dir, organized by repo hash
+- Path: `~/.claude-squad/worktrees/<repo-hash>/<sanitized_title>_<hex_timestamp>`
 - Branch names: `<configurable_prefix><sanitized_title>`
 - Always use absolute paths for reliability
+- Repo hash prevents collisions when multiple repos have instances with same title
+
+### Canonical Path Resolution
+- All repo paths resolved via `filepath.EvalSymlinks()` before hashing
+- Ensures symlinks to same repo get same hash and share state
+- Prevents accidental state duplication from different access paths
 
 ### Testing Patterns
 - Dependency injection for testability: `PtyFactory`, `cmd.Executor`
 - Test constructors: `NewTmuxSessionWithDeps`, `Instance.SetTmuxSession`
 - Mock git operations using test repos in temp directories
 
-### Concurrency
-- Preview updates every 100ms (previewTickMsg)
-- Metadata updates every 500ms (tickUpdateMetadataMessage) for status/diff
-- All UI updates go through Bubble Tea's message loop
+### Concurrency and Locking
+- **Process-level locking**: Only one `cs` per repository (file lock)
+- **Lock is atomic**: Uses kernel-enforced `flock()` / `LockFileEx`
+- **Auto-release**: Lock released when process exits (even on crash)
+- **Multiple repos**: Different repos can run `cs` concurrently without conflicts
+- **UI updates**: Preview every 100ms, metadata every 500ms via Bubble Tea message loop
 
 ## Common Gotchas
 
-1. **Sanitization**: Session names are sanitized (spaces removed, dots replaced with underscores) before use in tmux
-2. **Exact Match**: Use `tmux has-session -t=name` (with `=`) for exact matching, not prefix matching
-3. **PTY Cleanup**: Always close and restore PTY after operations; never leave `t.ptmx` as nil after Start/Restore
-4. **Context Cancellation**: Attach goroutines must respect context for clean shutdown
-5. **Storage Sync**: Call `storage.SaveInstances()` after state changes (new instance, delete, pause)
-6. **Branch Checkout**: Cannot resume if branch is checked out elsewhere
-7. **History Capture**: Use `-S - -E -` for full scrollback history in tmux
+1. **Per-Repo Isolation**: Each repository has independent state in `.claude-squad/`. Instances don't appear across repos.
+2. **Lock Conflicts**: Only one `cs` instance per repo. If you see "another cs instance is running", check for:
+   - Existing `cs` process in that repo
+   - Stale lock (shouldn't happen - auto-released on crash, but check `.claude-squad/cs.lock`)
+3. **Tmux Session Naming**: Sessions include repo hash: `claudesquad_<hash>_<title>`. Same title in different repos = different sessions.
+4. **Sanitization**: Session names are sanitized (spaces removed, dots replaced with underscores) before use in tmux
+5. **Exact Match**: Use `tmux has-session -t=name` (with `=`) for exact matching, not prefix matching
+6. **PTY Cleanup**: Always close and restore PTY after operations; never leave `t.ptmx` as nil after Start/Restore
+7. **Context Cancellation**: Attach goroutines must respect context for clean shutdown
+8. **Storage Sync**: Call `storage.SaveInstances()` after state changes (new instance, delete, pause)
+9. **Branch Checkout**: Cannot resume if branch is checked out elsewhere
+10. **History Capture**: Use `-S - -E -` for full scrollback history in tmux
+11. **Symlinks**: Symlinks to same repo get same hash - state is shared, not duplicated
+12. **Migration**: Upgrading to per-repo isolation requires `cs reset` to clean old global state
 
 ## Prerequisites
 
